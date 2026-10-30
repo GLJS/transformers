@@ -40,7 +40,7 @@ from transformers import (
 )
 
 
-# Applied in order; fused projections are split afterwards in `convert_state_dict`.
+# Applied in order
 KEY_MAPPING = [
     (r"^audio\.encoder\.vit\.embeds\.proj\.", "audio_model.embeddings.patch_embedding."),
     (r"^audio\.encoder\.vit\.embeds\.reg_token", "audio_model.embeddings.register_tokens"),
@@ -67,13 +67,10 @@ KEY_MAPPING = [
     (r"\.gamma_1$", ".layer_scale1.lambda1"),
     (r"\.gamma_2$", ".layer_scale2.lambda1"),
     (r"\.head\.q\.", ".head.q_proj."),
+    (r"\.head\.kv\.", ".head.kv_proj."),
+    (r"\.self_attn\.qkv\.", ".self_attn.qkv_proj."),
     (r"\.mlp\.(fc2|w3)\.", ".mlp.down_proj."),
     (r"\.mlp\.fc1\.", ".mlp.gate_up_proj."),
-]
-# Fused tensors, split along dim 0
-SPLITS = [
-    (r"\.self_attn\.qkv\.", [".self_attn.q_proj.", ".self_attn.k_proj.", ".self_attn.v_proj."]),
-    (r"\.head\.kv\.", [".head.k_proj.", ".head.v_proj."]),
 ]
 
 
@@ -82,15 +79,9 @@ def convert_state_dict(state_dict):
     for key, value in state_dict.items():
         for pattern, replacement in KEY_MAPPING:
             key = re.sub(pattern, replacement, key)
-        split = [(pattern, names) for pattern, names in SPLITS if re.search(pattern, key)]
         if key.endswith(".mlp.w12.weight"):  # the text SwiGLU gates its second half: move the gate first
             key, value = key.replace(".w12.", ".gate_up_proj."), torch.cat(value.chunk(2)[::-1])
-        if split:
-            ((pattern, names),) = split
-            for name, chunk in zip(names, value.chunk(len(names))):
-                converted[re.sub(pattern, name, key)] = chunk.clone()
-        else:
-            converted[key] = value
+        converted[key] = value
     return converted
 
 
