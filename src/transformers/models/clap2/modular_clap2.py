@@ -31,7 +31,7 @@ from ...utils import TransformersKwargs, auto_docstring, can_return_tuple
 from ...utils.generic import merge_with_config_defaults
 from ...utils.output_capturing import capture_outputs
 from ..clap.modeling_clap import ClapOutput, contrastive_loss
-from ..cohere.modeling_cohere import CohereRotaryEmbedding, apply_rotary_pos_emb
+from ..cohere.modeling_cohere import CohereRotaryEmbedding, rotate_half
 from ..dinov2.modeling_dinov2 import Dinov2LayerScale
 from ..llama.modeling_llama import LlamaRMSNorm, eager_attention_forward
 
@@ -87,12 +87,12 @@ class Clap2AudioConfig(PreTrainedConfig):
         Number of mel bins of the log-mel spectrogram the patches are cut from.
     num_register_tokens (`int`, *optional*, defaults to 1):
         Number of learned register tokens prepended to the patch sequence.
+    pooler_hidden_act (`str`, *optional*, defaults to `"gelu"`):
+        The activation function of the MLP in the attention pooling head.
     use_qk_norm (`bool`, *optional*, defaults to `False`):
         Whether to apply an RMSNorm over the head dimension of the queries and keys.
     layerscale_value (`float`, *optional*, defaults to 1e-05):
         Initial value of the per-channel residual scaling. No scaling is applied when `None`.
-    pooler_hidden_act (`str`, *optional*, defaults to `"gelu"`):
-        The activation function of the MLP in the attention pooling head.
 
     Example:
 
@@ -163,7 +163,9 @@ class Clap2Output(ClapOutput):
 
 
 class Clap2RMSNorm(LlamaRMSNorm):
-    pass
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # torch's RMSNorm, as in OpenCLIP and timm, so that outputs match them in every dtype and on every device
+        return F.rms_norm(hidden_states, self.weight.shape, self.weight, self.variance_epsilon)
 
 
 class Clap2MLP(nn.Module):
@@ -230,6 +232,13 @@ class Clap2AudioRotaryEmbedding(nn.Module):
         return cos.to(x.dtype), sin.to(x.dtype)
 
 
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
+    """Applies interleaved rotary position embeddings in the dtype of `q` and `k`, as in OpenCLIP and timm."""
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
+
+
 class Clap2Attention(nn.Module):
     def __init__(self, config: Clap2AudioConfig | Clap2TextConfig):
         super().__init__()
@@ -239,9 +248,9 @@ class Clap2Attention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = False
-        self.q_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
-        self.k_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
-        self.v_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
+        # fused, as in the original checkpoints: on GPU, cuBLAS rounds a 3 x hidden_size projection differently
+        # from three hidden_size ones
+        self.qkv_proj = nn.Linear(config.hidden_size, 3 * config.hidden_size, bias=config.attention_bias)
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
         self.q_norm = Clap2RMSNorm(self.head_dim, eps=config.rms_norm_eps) if config.use_qk_norm else nn.Identity()
         self.k_norm = Clap2RMSNorm(self.head_dim, eps=config.rms_norm_eps) if config.use_qk_norm else nn.Identity()
@@ -254,11 +263,9 @@ class Clap2Attention(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
-
-        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        qkv = self.qkv_proj(hidden_states).view(*input_shape, 3, -1, self.head_dim).permute(2, 0, 3, 1, 4)
+        query_states, key_states, value_states = qkv.unbind(0)
+        query_states, key_states = self.q_norm(query_states), self.k_norm(key_states)
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -340,18 +347,17 @@ class Clap2AttentionPoolingHead(nn.Module):
         self.is_causal = False
         self.probe = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         self.q_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
-        self.k_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
-        self.v_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
+        self.kv_proj = nn.Linear(config.hidden_size, 2 * config.hidden_size, bias=config.attention_bias)
         self.q_norm = Clap2RMSNorm(self.head_dim, eps=config.rms_norm_eps) if config.use_qk_norm else nn.Identity()
         self.k_norm = Clap2RMSNorm(self.head_dim, eps=config.rms_norm_eps) if config.use_qk_norm else nn.Identity()
 
     def forward(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
         batch_size = hidden_states.shape[0]
-        hidden_shape = (batch_size, -1, self.config.num_attention_heads, self.head_dim)
         probe = self.probe.expand(batch_size, -1, -1)
-        query = self.q_norm(self.q_proj(probe).view(hidden_shape)).transpose(1, 2)
-        key = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        value = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        query = self.q_proj(probe).view(batch_size, 1, -1, self.head_dim).transpose(1, 2)
+        kv = self.kv_proj(hidden_states).view(batch_size, hidden_states.shape[1], 2, -1, self.head_dim)
+        key, value = kv.permute(2, 0, 3, 1, 4).unbind(0)
+        query, key = self.q_norm(query), self.k_norm(key)
         attention_mask = create_bidirectional_mask(
             config=self.config,
             inputs_embeds=probe,
@@ -463,8 +469,12 @@ class Clap2TextModel(Clap2PreTrainedModel):
         encoder_outputs: BaseModelOutput = self.encoder(
             hidden_states,
             position_embeddings=self.rotary_emb(hidden_states, position_ids),
+            # always materialized, as in OpenCLIP: an all-ones mask would select another SDPA kernel in half precision
             attention_mask=create_bidirectional_mask(
-                config=self.config, inputs_embeds=hidden_states, attention_mask=attention_mask
+                config=self.config,
+                inputs_embeds=hidden_states,
+                attention_mask=attention_mask,
+                allow_is_bidirectional_skip=False,
             ),
             **kwargs,
         )
@@ -514,10 +524,11 @@ class Clap2AudioModel(Clap2PreTrainedModel):
         """
         if input_features_mask is None:
             input_features_mask = torch.ones(input_features.shape[:2], dtype=torch.long, device=input_features.device)
-        # A clip with `num_time_patches` columns holds its patches frequency-major: patch i sits at (i // T, i % T)
+        # A clip with `num_time_patches` columns holds its patches frequency-major: its i-th patch sits at
+        # (i // T, i % T). Counting only unmasked patches makes this independent of the padding side.
         num_freq_patches = self.config.num_mel_bins // self.config.patch_size
         num_time_patches = input_features_mask.sum(-1, keepdim=True) // num_freq_patches
-        patch_index = torch.arange(input_features.shape[1], device=input_features.device)
+        patch_index = input_features_mask.cumsum(-1) - 1
         position_ids = torch.stack([patch_index // num_time_patches, patch_index % num_time_patches], dim=-1)
         position_ids = position_ids * input_features_mask[..., None]  # padding patches point at (0, 0)
 
@@ -526,10 +537,12 @@ class Clap2AudioModel(Clap2PreTrainedModel):
         num_registers = self.config.num_register_tokens
         # register tokens are not rotated
         position_embeddings = (F.pad(cos, (0, 0, num_registers, 0), value=1.0), F.pad(sin, (0, 0, num_registers, 0)))
+        # always materialized, as in timm: an all-ones mask would select another SDPA kernel in half precision
         attention_mask = create_bidirectional_mask(
             config=self.config,
             inputs_embeds=hidden_states,
             attention_mask=F.pad(input_features_mask, (num_registers, 0), value=1),
+            allow_is_bidirectional_skip=False,
         )
         encoder_outputs: BaseModelOutput = self.encoder(
             hidden_states, position_embeddings=position_embeddings, attention_mask=attention_mask, **kwargs

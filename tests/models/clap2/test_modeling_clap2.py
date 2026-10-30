@@ -35,7 +35,7 @@ class Clap2AudioModelTester:
     def __init__(
         self,
         parent,
-        batch_size=3,
+        batch_size=12,
         num_mel_bins=16,
         patch_size=4,
         num_time_patches=5,
@@ -91,7 +91,7 @@ class Clap2TextModelTester:
     def __init__(
         self,
         parent,
-        batch_size=3,
+        batch_size=12,
         seq_length=7,
         vocab_size=99,
         hidden_size=32,

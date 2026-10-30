@@ -75,12 +75,12 @@ class Clap2AudioConfig(PreTrainedConfig):
         Number of mel bins of the log-mel spectrogram the patches are cut from.
     num_register_tokens (`int`, *optional*, defaults to 1):
         Number of learned register tokens prepended to the patch sequence.
+    pooler_hidden_act (`str`, *optional*, defaults to `"gelu"`):
+        The activation function of the MLP in the attention pooling head.
     use_qk_norm (`bool`, *optional*, defaults to `False`):
         Whether to apply an RMSNorm over the head dimension of the queries and keys.
     layerscale_value (`float`, *optional*, defaults to 1e-05):
         Initial value of the per-channel residual scaling. No scaling is applied when `None`.
-    pooler_hidden_act (`str`, *optional*, defaults to `"gelu"`):
-        The activation function of the MLP in the attention pooling head.
 
     Example:
 
