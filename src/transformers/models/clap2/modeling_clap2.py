@@ -44,17 +44,17 @@ from .configuration_clap2 import Clap2AudioConfig, Clap2Config, Clap2TextConfig
 @dataclass
 class Clap2Output(ModelOutput):
     r"""
-    loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `return_loss` is `True`):
+    loss (`torch.Tensor` of shape `(1,)`, *optional*, returned when `return_loss` is `True`):
         Contrastive loss for audio-text similarity.
-    logits_per_audio (`torch.FloatTensor` of shape `(audio_batch_size, text_batch_size)`):
+    logits_per_audio (`torch.Tensor` of shape `(audio_batch_size, text_batch_size)`):
         The scaled dot product scores between `audio_embeds` and `text_embeds`. This represents the audio-text
         similarity scores.
-    logits_per_text (`torch.FloatTensor` of shape `(text_batch_size, audio_batch_size)`):
+    logits_per_text (`torch.Tensor` of shape `(text_batch_size, audio_batch_size)`):
         The scaled dot product scores between `text_embeds` and `audio_embeds`. This represents the text-audio
         similarity scores.
-    text_embeds (`torch.FloatTensor` of shape `(batch_size, output_dim`):
+    text_embeds (`torch.Tensor` of shape `(batch_size, output_dim`):
         The text embeddings obtained by applying the projection layer to the pooled output of [`Clap2TextModel`].
-    audio_embeds (`torch.FloatTensor` of shape `(batch_size, output_dim`):
+    audio_embeds (`torch.Tensor` of shape `(batch_size, output_dim`):
         The audio embeddings obtained by applying the projection layer to the pooled output of [`Clap2AudioModel`].
     text_model_output (`BaseModelOutputWithPooling`):
         The output of the [`Clap2TextModel`].
@@ -62,11 +62,11 @@ class Clap2Output(ModelOutput):
         The output of the [`Clap2AudioModel`].
     """
 
-    loss: torch.FloatTensor | None = None
-    logits_per_audio: torch.FloatTensor | None = None
-    logits_per_text: torch.FloatTensor | None = None
-    text_embeds: torch.FloatTensor | None = None
-    audio_embeds: torch.FloatTensor | None = None
+    loss: torch.Tensor | None = None
+    logits_per_audio: torch.Tensor | None = None
+    logits_per_text: torch.Tensor | None = None
+    text_embeds: torch.Tensor | None = None
+    audio_embeds: torch.Tensor | None = None
     text_model_output: BaseModelOutputWithPooling = None
     audio_model_output: BaseModelOutputWithPooling = None
 
@@ -162,28 +162,43 @@ class Clap2TextRotaryEmbedding(nn.Module):
 class Clap2AudioRotaryEmbedding(nn.Module):
     """2D axial rotary embedding: half of the rotated pairs encode the frequency index of a patch, half its time index."""
 
-    inv_freq: torch.Tensor
-
     def __init__(self, config: Clap2AudioConfig):
         super().__init__()
         self.config = config
+
         self.rope_type = self.config.rope_parameters["rope_type"]
-        inv_freq, self.attention_scaling = self.compute_default_rope_parameters(self.config)
+        rope_init_fn: Callable = self.compute_axial_rope_parameters
+        if self.rope_type != "axial":
+            raise ValueError(f"{self.__class__.__name__} supports only axial rope, but requested {self.rope_type}")
+        inv_freq, self.attention_scaling = rope_init_fn(self.config)
+
         self.inv_freq = nn.Buffer(inv_freq, persistent=False)
         self.original_inv_freq = nn.Buffer(inv_freq.clone(), persistent=False)
 
     @staticmethod
-    def compute_default_rope_parameters(config: Clap2AudioConfig, **kwargs) -> tuple[torch.Tensor, float]:
+    def compute_axial_rope_parameters(config: Clap2AudioConfig, device=None, **kwargs) -> tuple[torch.Tensor, float]:
+        """
+        Computes the inverse frequencies according to the original RoPE implementation
+        Args:
+            config ([`~transformers.PreTrainedConfig`]):
+                The model configuration.
+        Returns:
+            Tuple of (`torch.Tensor`, `float`), containing the inverse frequencies for the RoPE embeddings and the
+            post-processing scaling factor applied to the computed cos/sin (unused in this type of RoPE).
+        """
         base = config.rope_parameters["rope_theta"]
-        dim = config.hidden_size // config.num_attention_heads // 2
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
-        return inv_freq, 1.0
+        dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+        spatial_dim = dim // 2
+
+        attention_factor = 1.0  # Unused in this type of RoPE
+        inv_freq = 1.0 / (base ** (torch.arange(0, spatial_dim, 2, dtype=torch.float) / spatial_dim))
+        return inv_freq.to(device), attention_factor
 
     @torch.no_grad()
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # position_ids: (batch_size, num_patches, 2) holding the (frequency, time) index of each patch. As in timm,
-        # cos/sin are computed once on the patch grid of the longest clip and gathered per patch, which keeps them
-        # bit-identical to it on CPU.
+        # cos/sin are computed once on the patch grid of the longest clip and gathered per patch: on CPU, cos/sin of
+        # another tensor layout can round differently.
         num_freq_patches = self.config.num_mel_bins // self.config.patch_size
         grid = torch.meshgrid(
             torch.arange(num_freq_patches, device=x.device),
@@ -367,11 +382,13 @@ class Clap2AttentionPoolingHead(nn.Module):
         kv = self.kv_proj(hidden_states).view(batch_size, hidden_states.shape[1], 2, -1, self.head_dim)
         key, value = kv.permute(2, 0, 3, 1, 4).unbind(0)
         query, key = self.q_norm(query), self.k_norm(key)
+        # always materialized, as in OpenCLIP and timm: without a mask SDPA can pick another kernel in half precision
         attention_mask = create_bidirectional_mask(
             config=self.config,
             inputs_embeds=probe,
             attention_mask=attention_mask,
             encoder_hidden_states=hidden_states,
+            allow_is_bidirectional_skip=False,
         )
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, eager_attention_forward
@@ -424,7 +441,12 @@ class Clap2PreTrainedModel(PreTrainedModel):
     base_model_prefix = "clap2"
     input_modalities = ("audio", "text")
     supports_gradient_checkpointing = True
-    _no_split_modules = ["Clap2AudioEmbeddings", "Clap2EncoderLayer", "Clap2AttentionPoolingHead"]
+    _no_split_modules = [
+        "Clap2AudioEmbeddings",
+        "Clap2EncoderLayer",
+        "Clap2AttentionPoolingHead",
+        "Clap2AudioAttentionPoolingHead",
+    ]
     _supports_flash_attn = True
     _supports_sdpa = True
     _supports_flex_attn = True
@@ -439,8 +461,7 @@ class Clap2PreTrainedModel(PreTrainedModel):
         elif isinstance(module, Clap2AttentionPoolingHead):
             init.normal_(module.probe, std=module.probe.shape[-1] ** -0.5)
         elif isinstance(module, Clap2LayerScale):
-            audio_config = getattr(self.config, "audio_config", self.config)
-            init.constant_(module.lambda1, audio_config.layerscale_value)
+            init.constant_(module.lambda1, self.config.layerscale_value)
         elif isinstance(module, Clap2Model):
             init.constant_(module.logit_scale, self.config.logit_scale_init_value)
 
@@ -705,8 +726,8 @@ class Clap2Model(Clap2PreTrainedModel):
         )
         audio_embeds = self.audio_projection(audio_outputs.pooler_output)
         text_embeds = self.text_projection(text_outputs.pooler_output)
-        audio_embeds = audio_embeds / audio_embeds.norm(p=2, dim=-1, keepdim=True)
-        text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
+        audio_embeds = F.normalize(audio_embeds, dim=-1)
+        text_embeds = F.normalize(text_embeds, dim=-1)
 
         logits_per_audio = self.logit_scale.exp() * audio_embeds @ text_embeds.t()
         logits_per_text = logits_per_audio.t()

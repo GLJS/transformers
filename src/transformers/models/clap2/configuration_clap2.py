@@ -66,6 +66,12 @@ class Clap2TextConfig(PreTrainedConfig):
     bos_token_id: int | None = 50259
     eos_token_id: int | list[int] | None = 50257
 
+    def validate_architecture(self):
+        """Part of `@strict`-powered validation. Validates the architecture of the config."""
+        super().validate_architecture()
+        if self.hidden_size % (2 * self.num_attention_heads):
+            raise ValueError(f"`hidden_size` must be a multiple of 2 * `num_attention_heads`, got {self.hidden_size}.")
+
 
 @auto_docstring(checkpoint="laion/clap2-large-audioxl-s1B")
 @strict
@@ -95,6 +101,7 @@ class Clap2AudioConfig(PreTrainedConfig):
     model_type = "clap2_audio_model"
     base_config_key = "audio_config"
     default_theta = 10000.0
+    default_rope_type = "axial"
 
     hidden_size: int = 1024
     intermediate_size: int = 2816
@@ -113,6 +120,15 @@ class Clap2AudioConfig(PreTrainedConfig):
     attention_dropout: float | int = 0.0
     rope_parameters: RopeParameters | dict | None = None
     initializer_range: float = 0.02
+
+    def validate_architecture(self):
+        """Part of `@strict`-powered validation. Validates the architecture of the config."""
+        super().validate_architecture()
+        if self.hidden_size % (4 * self.num_attention_heads) or self.num_mel_bins % self.patch_size:
+            raise ValueError(
+                "`hidden_size` must be a multiple of 4 * `num_attention_heads` and `num_mel_bins` a multiple of "
+                f"`patch_size`, got {self.hidden_size}, {self.num_attention_heads}, {self.num_mel_bins}, {self.patch_size}."
+            )
 
 
 @auto_docstring(checkpoint="laion/clap2-large-audioxl-s1B")

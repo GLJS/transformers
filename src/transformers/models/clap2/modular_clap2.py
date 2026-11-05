@@ -34,6 +34,7 @@ from ..clap.modeling_clap import ClapOutput, contrastive_loss
 from ..cohere.modeling_cohere import CohereRotaryEmbedding, rotate_half
 from ..dinov2.modeling_dinov2 import Dinov2LayerScale
 from ..llama.modeling_llama import LlamaRMSNorm, eager_attention_forward
+from ..sam3.modeling_sam3 import Sam3ViTRotaryEmbedding
 
 
 @auto_docstring(checkpoint="laion/clap2-large-audioxl-s1B")
@@ -78,6 +79,12 @@ class Clap2TextConfig(PreTrainedConfig):
     bos_token_id: int | None = 50259
     eos_token_id: int | list[int] | None = 50257
 
+    def validate_architecture(self):
+        """Part of `@strict`-powered validation. Validates the architecture of the config."""
+        super().validate_architecture()
+        if self.hidden_size % (2 * self.num_attention_heads):
+            raise ValueError(f"`hidden_size` must be a multiple of 2 * `num_attention_heads`, got {self.hidden_size}.")
+
 
 @auto_docstring(checkpoint="laion/clap2-large-audioxl-s1B")
 @strict
@@ -107,6 +114,7 @@ class Clap2AudioConfig(PreTrainedConfig):
     model_type = "clap2_audio_model"
     base_config_key = "audio_config"
     default_theta = 10000.0
+    default_rope_type = "axial"
 
     hidden_size: int = 1024
     intermediate_size: int = 2816
@@ -125,6 +133,15 @@ class Clap2AudioConfig(PreTrainedConfig):
     attention_dropout: float | int = 0.0
     rope_parameters: RopeParameters | dict | None = None
     initializer_range: float = 0.02
+
+    def validate_architecture(self):
+        """Part of `@strict`-powered validation. Validates the architecture of the config."""
+        super().validate_architecture()
+        if self.hidden_size % (4 * self.num_attention_heads) or self.num_mel_bins % self.patch_size:
+            raise ValueError(
+                "`hidden_size` must be a multiple of 4 * `num_attention_heads` and `num_mel_bins` a multiple of "
+                f"`patch_size`, got {self.hidden_size}, {self.num_attention_heads}, {self.num_mel_bins}, {self.patch_size}."
+            )
 
 
 @auto_docstring(checkpoint="laion/clap2-large-audioxl-s1B")
@@ -195,31 +212,20 @@ class Clap2TextRotaryEmbedding(CohereRotaryEmbedding):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-class Clap2AudioRotaryEmbedding(nn.Module):
+class Clap2AudioRotaryEmbedding(Sam3ViTRotaryEmbedding):
     """2D axial rotary embedding: half of the rotated pairs encode the frequency index of a patch, half its time index."""
 
-    inv_freq: torch.Tensor
-
     def __init__(self, config: Clap2AudioConfig):
-        super().__init__()
-        self.config = config
-        self.rope_type = self.config.rope_parameters["rope_type"]
-        inv_freq, self.attention_scaling = self.compute_default_rope_parameters(self.config)
-        self.inv_freq = nn.Buffer(inv_freq, persistent=False)
-        self.original_inv_freq = nn.Buffer(inv_freq.clone(), persistent=False)
+        super().__init__(config)
 
-    @staticmethod
-    def compute_default_rope_parameters(config: Clap2AudioConfig, **kwargs) -> tuple[torch.Tensor, float]:
-        base = config.rope_parameters["rope_theta"]
-        dim = config.hidden_size // config.num_attention_heads // 2
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
-        return inv_freq, 1.0
+    def compute_axial_rope_parameters(config: Clap2AudioConfig, device=None, **kwargs) -> tuple[torch.Tensor, float]:
+        return super().compute_axial_rope_parameters(config, device, **kwargs)
 
     @torch.no_grad()
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # position_ids: (batch_size, num_patches, 2) holding the (frequency, time) index of each patch. As in timm,
-        # cos/sin are computed once on the patch grid of the longest clip and gathered per patch, which keeps them
-        # bit-identical to it on CPU.
+        # cos/sin are computed once on the patch grid of the longest clip and gathered per patch: on CPU, cos/sin of
+        # another tensor layout can round differently.
         num_freq_patches = self.config.num_mel_bins // self.config.patch_size
         grid = torch.meshgrid(
             torch.arange(num_freq_patches, device=x.device),
@@ -230,6 +236,9 @@ class Clap2AudioRotaryEmbedding(nn.Module):
         cos = torch.repeat_interleave(freqs.cos().flatten(-2), 2, dim=-1)[position_ids[..., 0], position_ids[..., 1]]
         sin = torch.repeat_interleave(freqs.sin().flatten(-2), 2, dim=-1)[position_ids[..., 0], position_ids[..., 1]]
         return cos.to(x.dtype), sin.to(x.dtype)
+
+    def recomposition_frequencies(self, freq):
+        raise AttributeError("Not needed for Clap2")
 
 
 def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
@@ -358,11 +367,13 @@ class Clap2AttentionPoolingHead(nn.Module):
         kv = self.kv_proj(hidden_states).view(batch_size, hidden_states.shape[1], 2, -1, self.head_dim)
         key, value = kv.permute(2, 0, 3, 1, 4).unbind(0)
         query, key = self.q_norm(query), self.k_norm(key)
+        # always materialized, as in OpenCLIP and timm: without a mask SDPA can pick another kernel in half precision
         attention_mask = create_bidirectional_mask(
             config=self.config,
             inputs_embeds=probe,
             attention_mask=attention_mask,
             encoder_hidden_states=hidden_states,
+            allow_is_bidirectional_skip=False,
         )
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, eager_attention_forward
@@ -415,7 +426,12 @@ class Clap2PreTrainedModel(PreTrainedModel):
     base_model_prefix = "clap2"
     input_modalities = ("audio", "text")
     supports_gradient_checkpointing = True
-    _no_split_modules = ["Clap2AudioEmbeddings", "Clap2EncoderLayer", "Clap2AttentionPoolingHead"]
+    _no_split_modules = [
+        "Clap2AudioEmbeddings",
+        "Clap2EncoderLayer",
+        "Clap2AttentionPoolingHead",
+        "Clap2AudioAttentionPoolingHead",
+    ]
     _supports_flash_attn = True
     _supports_sdpa = True
     _supports_flex_attn = True
@@ -430,8 +446,7 @@ class Clap2PreTrainedModel(PreTrainedModel):
         elif isinstance(module, Clap2AttentionPoolingHead):
             init.normal_(module.probe, std=module.probe.shape[-1] ** -0.5)
         elif isinstance(module, Clap2LayerScale):
-            audio_config = getattr(self.config, "audio_config", self.config)
-            init.constant_(module.lambda1, audio_config.layerscale_value)
+            init.constant_(module.lambda1, self.config.layerscale_value)
         elif isinstance(module, Clap2Model):
             init.constant_(module.logit_scale, self.config.logit_scale_init_value)
 
@@ -689,8 +704,8 @@ class Clap2Model(Clap2PreTrainedModel):
         )
         audio_embeds = self.audio_projection(audio_outputs.pooler_output)
         text_embeds = self.text_projection(text_outputs.pooler_output)
-        audio_embeds = audio_embeds / audio_embeds.norm(p=2, dim=-1, keepdim=True)
-        text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
+        audio_embeds = F.normalize(audio_embeds, dim=-1)
+        text_embeds = F.normalize(text_embeds, dim=-1)
 
         logits_per_audio = self.logit_scale.exp() * audio_embeds @ text_embeds.t()
         logits_per_text = logits_per_audio.t()

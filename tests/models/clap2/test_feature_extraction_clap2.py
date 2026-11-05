@@ -13,18 +13,52 @@
 # limitations under the License.
 """Testing suite for the CLAP2 feature extractor."""
 
-import tempfile
 import unittest
 
 import numpy as np
 
 from transformers import Clap2FeatureExtractor
 from transformers.testing_utils import require_torch, require_torchaudio
+from transformers.utils import is_torch_available
+
+from ...test_processing_common import floats_list
+from ...test_sequence_feature_extraction_common import SequenceFeatureExtractionTestMixin
+
+
+if is_torch_available():
+    import torch
+
+
+class Clap2FeatureExtractionTester:
+    def __init__(self, parent, batch_size=7, min_seq_length=400, max_seq_length=2000, feature_size=128):
+        self.parent = parent
+        self.batch_size = batch_size
+        self.min_seq_length = min_seq_length
+        self.max_seq_length = max_seq_length
+        self.seq_length_diff = (max_seq_length - min_seq_length) // (batch_size - 1)
+        self.feature_size = feature_size
+        self.padding_value = 0.0
+        self.sampling_rate = 32000
+
+    def prepare_feat_extract_dict(self):
+        return {"feature_size": self.feature_size, "sampling_rate": self.sampling_rate, "padding_value": 0.0}
+
+    def prepare_inputs_for_common(self, equal_length=False, numpify=False):
+        lengths = (
+            [self.max_seq_length] * self.batch_size
+            if equal_length
+            else range(self.min_seq_length, self.max_seq_length, self.seq_length_diff)
+        )
+        speech_inputs = [floats_list((length, self.feature_size)) for length in lengths]
+        return [np.asarray(x) for x in speech_inputs] if numpify else speech_inputs
 
 
 @require_torch
-class Clap2FeatureExtractionTest(unittest.TestCase):
+class Clap2FeatureExtractionTest(SequenceFeatureExtractionTestMixin, unittest.TestCase):
+    feature_extraction_class = Clap2FeatureExtractor
+
     def setUp(self):
+        self.feat_extract_tester = Clap2FeatureExtractionTester(self)
         rng = np.random.default_rng(0)
         # 0.1 s (less than one patch), 1 s and 2.5 s of noise at 32 kHz
         self.clips = [rng.standard_normal(n).astype(np.float32) * 0.1 for n in (3200, 32000, 80000)]
@@ -50,14 +84,18 @@ class Clap2FeatureExtractionTest(unittest.TestCase):
         inputs = feature_extractor(self.clips[2], sampling_rate=32000, return_tensors="pt")
         # whole time columns of 8 patches are kept
         self.assertEqual(inputs["input_features"].shape[1], 16)
+        with self.assertRaises(ValueError):
+            feature_extractor(self.clips[2], sampling_rate=32000, max_num_patches=7)
 
-    def test_save_load(self):
-        feature_extractor = Clap2FeatureExtractor(max_num_patches=1504)
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            feature_extractor.save_pretrained(tmpdirname)
-            loaded = Clap2FeatureExtractor.from_pretrained(tmpdirname)
-        self.assertEqual(loaded.to_dict(), feature_extractor.to_dict())
-        self.assertTrue(loaded.mel_filters.equal(feature_extractor.mel_filters))
+    def test_torch_inputs(self):
+        feature_extractor = Clap2FeatureExtractor()
+        expected = feature_extractor(self.clips, sampling_rate=32000, return_tensors="pt")["input_features"]
+        clips = [torch.from_numpy(clip) for clip in self.clips]
+        self.assertTrue(
+            feature_extractor(clips, sampling_rate=32000, return_tensors="pt")["input_features"].equal(expected)
+        )
+        single = feature_extractor(clips[1], sampling_rate=32000, return_tensors="pt")["input_features"]
+        self.assertTrue(single[0].equal(expected[1, : single.shape[1]]))
 
     def test_wrong_sampling_rate_and_channels(self):
         feature_extractor = Clap2FeatureExtractor()
@@ -68,7 +106,6 @@ class Clap2FeatureExtractionTest(unittest.TestCase):
 
     @require_torchaudio
     def test_matches_torchaudio(self):
-        import torch
         import torchaudio
 
         feature_extractor = Clap2FeatureExtractor()

@@ -85,20 +85,32 @@ def convert_state_dict(state_dict):
     return converted
 
 
+# OpenCLIP settings of the released checkpoints: any other key or value is an architecture this port does not
+# implement. The keys in the second sets are model sizes read below, or do not change the model.
+AUDIO_CFG = {"model_type": "naflexvit", "in_chans": 1, "rope_type": "axial"}
+AUDIO_FREE = {"sample_rate", "mel_bins", "window_size", "hop_size", "fmin", "fmax", "patch_freq", "patch_time",
+              "audio_seq_len", "naflexvit_cfg"}  # fmt: skip
+VIT_CFG = {"swiglu_mlp": True, "norm_layer": "rmsnorm", "pre_norm": True}
+VIT_FREE = {"embed_dim", "depth", "num_heads", "mlp_ratio", "init_values", "reg_tokens"}
+TEXT_CFG = {
+    "text_arch": "modern", "variable_text": True, "pos_embed": "rope", "rope_temperature": 10000.0, "pool_type": "map",
+    "attention_mode": "bidirectional", "mlp_type": "swiglu", "norm_type": "rmsnorm", "norm_eps": 1e-6, "qk_norm": True,
+    "attn_gated": False, "attention_bias": False, "mlp_bias": False, "tokenizer_type": "tiktoken", "tiktoken_name": "r50k_base",
+}  # fmt: skip
+TEXT_FREE = {"context_length", "vocab_size", "width", "heads", "layers", "mlp_ratio", "pad_id", "bos_id", "eos_id",
+             "tiktoken_bpe_path", "tiktoken_config_path"}  # fmt: skip
+
+
 def convert_config(model_cfg, state_dict):
     audio_cfg, text_cfg = model_cfg["audio_cfg"], model_cfg["text_cfg"]
     vit_cfg = audio_cfg["naflexvit_cfg"]
-    assert audio_cfg["patch_freq"] == audio_cfg["patch_time"] and audio_cfg["rope_type"] == "axial"
-    assert vit_cfg["swiglu_mlp"] and vit_cfg["norm_layer"] == "rmsnorm" and vit_cfg["pre_norm"]
-    assert (text_cfg["pos_embed"], text_cfg["pool_type"], text_cfg["mlp_type"], text_cfg["norm_type"]) == (
-        "rope",
-        "map",
-        "swiglu",
-        "rmsnorm",
-    )
-    assert text_cfg["attention_mode"] == "bidirectional" and text_cfg["qk_norm"] and not text_cfg["attn_gated"]
-    assert not text_cfg["attention_bias"] and not text_cfg["mlp_bias"] and text_cfg["norm_eps"] == 1e-6
-    assert text_cfg["rope_temperature"] == 10000.0
+    for cfg, expected, free in [
+        (audio_cfg, AUDIO_CFG, AUDIO_FREE),
+        (vit_cfg, VIT_CFG, VIT_FREE),
+        (text_cfg, TEXT_CFG, TEXT_FREE),
+    ]:
+        assert {key: value for key, value in cfg.items() if key not in free} == expected, cfg
+    assert audio_cfg["patch_freq"] == audio_cfg["patch_time"]
     audio_config = Clap2AudioConfig(
         hidden_size=vit_cfg["embed_dim"],
         intermediate_size=state_dict["audio.encoder.vit.blocks.0.mlp.fc2.weight"].shape[1],
@@ -137,9 +149,12 @@ def convert_processor(model_cfg):
     )
     # OpenCLIP tokenizes with tiktoken's `r50k_base` (the GPT-2 vocabulary) and wraps each text as
     # [<|bos|>] + text + [<|eos|>], with three special tokens appended after the vocabulary.
-    assert text_cfg["tokenizer_type"] == "tiktoken" and text_cfg["tiktoken_name"] == "r50k_base"
+    # `truncation` is a call default the processor reads from the saved tokenizer config: texts are cut to 256 tokens
     tokenizer = GPT2Tokenizer.from_pretrained(
-        "openai-community/gpt2", model_max_length=text_cfg["context_length"], split_special_tokens=True
+        "openai-community/gpt2",
+        model_max_length=text_cfg["context_length"],
+        split_special_tokens=True,
+        truncation=True,
     )
     for name, token in [("eos_token", "<|eos|>"), ("pad_token", "<|pad|>"), ("bos_token", "<|bos|>")]:
         tokenizer.add_special_tokens({name: token})

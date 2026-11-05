@@ -17,6 +17,7 @@ import math
 
 import numpy as np
 
+from ...audio_utils import AudioInput, make_list_of_audio
 from ...feature_extraction_sequence_utils import SequenceFeatureExtractor
 from ...feature_extraction_utils import BatchFeature
 from ...utils import TensorType, is_torch_available, logging
@@ -59,7 +60,8 @@ class Clap2FeatureExtractor(SequenceFeatureExtractor):
         patch_size (`int`, *optional*, defaults to 16):
             The number of mel bins and of frames per patch.
         max_num_patches (`int`, *optional*):
-            If set, longer clips keep only their first time columns of patches that fit in `max_num_patches`.
+            If set, longer clips keep only their first time columns of patches that fit in `max_num_patches`, which
+            must hold at least one column (`feature_size // patch_size` patches).
         padding_value (`float`, *optional*, defaults to 0.0):
             The value of the padding patches.
     """
@@ -105,7 +107,7 @@ class Clap2FeatureExtractor(SequenceFeatureExtractor):
 
         num_freq_patches = self.feature_size // self.patch_size
         if max_num_patches is not None:
-            log_mel = log_mel[: max(1, max_num_patches // num_freq_patches) * self.patch_size]
+            log_mel = log_mel[: max_num_patches // num_freq_patches * self.patch_size]
         num_time_patches = max(1, math.ceil(log_mel.shape[0] / self.patch_size))
         # the last time patch is completed with the quietest value of the clip
         num_fill_frames = num_time_patches * self.patch_size - log_mel.shape[0]
@@ -115,7 +117,7 @@ class Clap2FeatureExtractor(SequenceFeatureExtractor):
 
     def __call__(
         self,
-        raw_audio: np.ndarray | list[float] | list[np.ndarray] | list[list[float]],
+        raw_audio: AudioInput,
         sampling_rate: int | None = None,
         max_num_patches: int | None = None,
         return_tensors: str | TensorType | None = None,
@@ -125,7 +127,7 @@ class Clap2FeatureExtractor(SequenceFeatureExtractor):
         Main method to featurize one or several mono clips.
 
         Args:
-            raw_audio (`np.ndarray`, `list[float]`, `list[np.ndarray]`, `list[list[float]]`):
+            raw_audio (`np.ndarray`, `torch.Tensor`, `list[float]`, `list[np.ndarray]`, `list[torch.Tensor]`):
                 The clip or batch of clips. Each clip is a 1D array of mono samples at `sampling_rate`.
             sampling_rate (`int`, *optional*):
                 The sampling rate of `raw_audio`. It is strongly recommended to pass it, to catch clips at the wrong
@@ -146,12 +148,14 @@ class Clap2FeatureExtractor(SequenceFeatureExtractor):
                 f" sampling rate of {self.sampling_rate}. Please make sure that the provided `raw_audio` input"
                 f" was sampled with {self.sampling_rate} and not {sampling_rate}."
             )
-        is_batched = isinstance(raw_audio, (list, tuple)) and isinstance(raw_audio[0], (np.ndarray, list, tuple))
-        raw_audio = [np.asarray(audio, dtype=np.float32) for audio in (raw_audio if is_batched else [raw_audio])]
+        raw_audio = [np.asarray(audio, dtype=np.float32) for audio in make_list_of_audio(raw_audio)]
         if any(audio.ndim != 1 for audio in raw_audio):
             raise ValueError(f"Only mono-channel audio is supported for input to {self.__class__.__name__}")
 
         max_num_patches = max_num_patches if max_num_patches is not None else self.max_num_patches
+        num_freq_patches = self.feature_size // self.patch_size
+        if max_num_patches is not None and max_num_patches < num_freq_patches:
+            raise ValueError(f"`max_num_patches` must be at least {num_freq_patches}, one time column of patches.")
         patches = [self._extract_patches(audio, max_num_patches) for audio in raw_audio]
         num_patches = max(len(clip_patches) for clip_patches in patches)
         input_features = torch.full((len(patches), num_patches, self.patch_size**2), float(self.padding_value))

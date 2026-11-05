@@ -212,6 +212,10 @@ class Clap2AudioModelTest(ModelTesterMixin, unittest.TestCase):
     def test_training(self):
         pass
 
+    @unittest.skip(reason="The audio RoPE takes the patch positions of a padded batch, not arbitrary coordinates")
+    def test_vision_axial_rope(self):
+        pass
+
     def test_padding_patches_are_ignored(self):
         config, input_features, input_features_mask = self.model_tester.prepare_config_and_inputs()
         model = Clap2AudioModel(config).to(torch_device).eval()
@@ -228,7 +232,7 @@ class Clap2TextModelTest(ModelTesterMixin, unittest.TestCase):
 
     def setUp(self):
         self.model_tester = Clap2TextModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=Clap2TextConfig, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=Clap2TextConfig, hidden_size=60)
 
     def test_config(self):
         self.config_tester.run_common_tests()
@@ -267,12 +271,16 @@ class Clap2ModelTest(ModelTesterMixin, unittest.TestCase):
     def test_hidden_states_output(self):
         pass
 
-    @unittest.skip(reason="Inputs_embeds is tested in individual model tests")
+    @unittest.skip(reason="CLAP2 takes input_ids and audio patches, not inputs_embeds")
     def test_inputs_embeds(self):
         pass
 
     @unittest.skip(reason="Retain_grad is tested in individual model tests")
     def test_retain_grad_hidden_states_attentions(self):
+        pass
+
+    @unittest.skip(reason="The audio RoPE takes the patch positions of a padded batch, not arbitrary coordinates")
+    def test_vision_axial_rope(self):
         pass
 
 
