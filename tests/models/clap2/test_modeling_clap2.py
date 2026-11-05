@@ -232,7 +232,7 @@ class Clap2TextModelTest(ModelTesterMixin, unittest.TestCase):
 
     def setUp(self):
         self.model_tester = Clap2TextModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=Clap2TextConfig, hidden_size=60)
+        self.config_tester = ConfigTester(self, config_class=Clap2TextConfig, hidden_size=48)
 
     def test_config(self):
         self.config_tester.run_common_tests()

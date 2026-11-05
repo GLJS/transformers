@@ -34,8 +34,8 @@ import torch
 from datasets import Audio, load_dataset
 from transformers import AutoModel, AutoProcessor
 
-model = AutoModel.from_pretrained("laion/clap2-large-audioxl-s1B")
-processor = AutoProcessor.from_pretrained("laion/clap2-large-audioxl-s1B")
+model = AutoModel.from_pretrained("laion/clap2-small-audioxl-s1B")
+processor = AutoProcessor.from_pretrained("laion/clap2-small-audioxl-s1B")
 
 dataset = load_dataset("ashraq/esc50", split="train", streaming=True)
 dataset = dataset.cast_column("audio", Audio(sampling_rate=32000))
@@ -48,13 +48,6 @@ with torch.inference_mode():
 print(dict(zip(texts, outputs.logits_per_audio.softmax(dim=-1)[0].tolist())))
 ```
 
-## Usage tips
-
-- The feature extractor expects mono audio at 32 kHz and does not resample. Average the channels and resample beforehand, for example with `datasets.Audio(sampling_rate=32000)`.
-- Clips are not cropped. A clip becomes `8 x ceil(num_frames / 16)` patches and a batch is padded to its longest clip, with `input_features_mask` marking the real patches. Pass `max_num_patches` to the processor or feature extractor to cap long clips: `max_num_patches=1504` keeps the first 30 seconds, the cap of the CLAP2 evaluation.
-- The processor truncates texts to 256 tokens, as OpenCLIP does (pass `truncation=True` when calling the tokenizer directly). OpenCLIP also pads every text to 256 tokens: `padding="max_length"` reproduces that, while `padding=True` gives the same embeddings up to float32 rounding.
-- [`~Clap2Model.get_audio_features`] and [`~Clap2Model.get_text_features`] return projected but unnormalized embeddings, while [`Clap2Model`] returns normalized `audio_embeds` and `text_embeds`.
-- The tokenizer is case-sensitive and the models saw little text written entirely in capitals: lowercase such text (for example all-caps transcripts) first, as the CLAP2 evaluation does.
 
 ## Clap2Config
 

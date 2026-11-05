@@ -18,7 +18,7 @@ import unittest
 import numpy as np
 
 from transformers import Clap2FeatureExtractor
-from transformers.testing_utils import require_torch, require_torchaudio
+from transformers.testing_utils import require_torch, require_torch_accelerator, require_torchaudio, torch_device
 from transformers.utils import is_torch_available
 
 from ...test_processing_common import floats_list
@@ -97,6 +97,14 @@ class Clap2FeatureExtractionTest(SequenceFeatureExtractionTestMixin, unittest.Te
         single = feature_extractor(clips[1], sampling_rate=32000, return_tensors="pt")["input_features"]
         self.assertTrue(single[0].equal(expected[1, : single.shape[1]]))
 
+    @require_torch_accelerator
+    def test_device(self):
+        feature_extractor = Clap2FeatureExtractor()
+        expected = feature_extractor(self.clips, sampling_rate=32000, return_tensors="pt")["input_features"]
+        features = feature_extractor(self.clips, sampling_rate=32000, return_tensors="pt", device=torch_device)
+        self.assertEqual(features["input_features"].device.type, "cpu")
+        torch.testing.assert_close(features["input_features"], expected, rtol=0, atol=1e-2)
+
     def test_wrong_sampling_rate_and_channels(self):
         feature_extractor = Clap2FeatureExtractor()
         with self.assertRaises(ValueError):
@@ -119,4 +127,5 @@ class Clap2FeatureExtractionTest(SequenceFeatureExtractionTestMixin, unittest.Te
         log_mel = torch.cat([log_mel, fill])
         expected = log_mel.reshape(num_time_patches, 16, 8, 16).permute(2, 0, 3, 1).reshape(-1, 256)
         patches = feature_extractor(clip, sampling_rate=32000, return_tensors="pt")["input_features"][0]
-        torch.testing.assert_close(patches, expected, rtol=0, atol=0)
+        # the mel filters come from `mel_filter_bank` (float64), torchaudio builds them in float32
+        torch.testing.assert_close(patches, expected, rtol=0, atol=1e-2)

@@ -24,7 +24,7 @@ from ...modeling_rope_utils import RopeParameters
 from ...utils import auto_docstring
 
 
-@auto_docstring(checkpoint="laion/clap2-large-audioxl-s1B")
+@auto_docstring(checkpoint="laion/clap2-small-audioxl-s1B")
 @strict
 class Clap2TextConfig(PreTrainedConfig):
     r"""
@@ -48,10 +48,10 @@ class Clap2TextConfig(PreTrainedConfig):
     default_theta = 10000.0
 
     vocab_size: int = 50260
-    hidden_size: int = 960
-    intermediate_size: int = 2560
+    hidden_size: int = 512
+    intermediate_size: int = 1408
     num_hidden_layers: int = 11
-    num_attention_heads: int = 15
+    num_attention_heads: int = 8
     max_position_embeddings: int = 256
     hidden_act: str = "silu"
     rms_norm_eps: float = 1e-6
@@ -73,7 +73,7 @@ class Clap2TextConfig(PreTrainedConfig):
             raise ValueError(f"`hidden_size` must be a multiple of 2 * `num_attention_heads`, got {self.hidden_size}.")
 
 
-@auto_docstring(checkpoint="laion/clap2-large-audioxl-s1B")
+@auto_docstring(checkpoint="laion/clap2-small-audioxl-s1B")
 @strict
 class Clap2AudioConfig(PreTrainedConfig):
     r"""
@@ -103,10 +103,10 @@ class Clap2AudioConfig(PreTrainedConfig):
     default_theta = 10000.0
     default_rope_type = "axial"
 
-    hidden_size: int = 1024
-    intermediate_size: int = 2816
+    hidden_size: int = 512
+    intermediate_size: int = 1408
     num_hidden_layers: int = 12
-    num_attention_heads: int = 16
+    num_attention_heads: int = 8
     num_mel_bins: int = 128
     patch_size: int = 16
     num_register_tokens: int = 1
@@ -131,11 +131,11 @@ class Clap2AudioConfig(PreTrainedConfig):
             )
 
 
-@auto_docstring(checkpoint="laion/clap2-large-audioxl-s1B")
+@auto_docstring(checkpoint="laion/clap2-small-audioxl-s1B")
 @strict
 class Clap2Config(PreTrainedConfig):
     r"""
-    projection_dim (`int`, *optional*, defaults to 960):
+    projection_dim (`int`, *optional*, defaults to 512):
         Dimension of the shared audio-text embedding space.
     projection_hidden_act (`str`, *optional*, defaults to `"gelu"`):
         The activation function of the audio projection MLP.
@@ -157,7 +157,7 @@ class Clap2Config(PreTrainedConfig):
 
     text_config: dict | PreTrainedConfig | None = None
     audio_config: dict | PreTrainedConfig | None = None
-    projection_dim: int = 960
+    projection_dim: int = 512
     projection_hidden_act: str = "gelu"
     logit_scale_init_value: float = 2.6592
 

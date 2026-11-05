@@ -37,7 +37,7 @@ from ..llama.modeling_llama import LlamaRMSNorm, eager_attention_forward
 from ..sam3.modeling_sam3 import Sam3ViTRotaryEmbedding
 
 
-@auto_docstring(checkpoint="laion/clap2-large-audioxl-s1B")
+@auto_docstring(checkpoint="laion/clap2-small-audioxl-s1B")
 @strict
 class Clap2TextConfig(PreTrainedConfig):
     r"""
@@ -61,10 +61,10 @@ class Clap2TextConfig(PreTrainedConfig):
     default_theta = 10000.0
 
     vocab_size: int = 50260
-    hidden_size: int = 960
-    intermediate_size: int = 2560
+    hidden_size: int = 512
+    intermediate_size: int = 1408
     num_hidden_layers: int = 11
-    num_attention_heads: int = 15
+    num_attention_heads: int = 8
     max_position_embeddings: int = 256
     hidden_act: str = "silu"
     rms_norm_eps: float = 1e-6
@@ -86,7 +86,7 @@ class Clap2TextConfig(PreTrainedConfig):
             raise ValueError(f"`hidden_size` must be a multiple of 2 * `num_attention_heads`, got {self.hidden_size}.")
 
 
-@auto_docstring(checkpoint="laion/clap2-large-audioxl-s1B")
+@auto_docstring(checkpoint="laion/clap2-small-audioxl-s1B")
 @strict
 class Clap2AudioConfig(PreTrainedConfig):
     r"""
@@ -116,10 +116,10 @@ class Clap2AudioConfig(PreTrainedConfig):
     default_theta = 10000.0
     default_rope_type = "axial"
 
-    hidden_size: int = 1024
-    intermediate_size: int = 2816
+    hidden_size: int = 512
+    intermediate_size: int = 1408
     num_hidden_layers: int = 12
-    num_attention_heads: int = 16
+    num_attention_heads: int = 8
     num_mel_bins: int = 128
     patch_size: int = 16
     num_register_tokens: int = 1
@@ -144,11 +144,11 @@ class Clap2AudioConfig(PreTrainedConfig):
             )
 
 
-@auto_docstring(checkpoint="laion/clap2-large-audioxl-s1B")
+@auto_docstring(checkpoint="laion/clap2-small-audioxl-s1B")
 @strict
 class Clap2Config(PreTrainedConfig):
     r"""
-    projection_dim (`int`, *optional*, defaults to 960):
+    projection_dim (`int`, *optional*, defaults to 512):
         Dimension of the shared audio-text embedding space.
     projection_hidden_act (`str`, *optional*, defaults to `"gelu"`):
         The activation function of the audio projection MLP.
@@ -170,7 +170,7 @@ class Clap2Config(PreTrainedConfig):
 
     text_config: dict | PreTrainedConfig | None = None
     audio_config: dict | PreTrainedConfig | None = None
-    projection_dim: int = 960
+    projection_dim: int = 512
     projection_hidden_act: str = "gelu"
     logit_scale_init_value: float = 2.6592
 
@@ -600,8 +600,8 @@ class Clap2Model(Clap2PreTrainedModel):
         >>> import torch
         >>> from transformers import AutoModel, AutoProcessor
 
-        >>> model = AutoModel.from_pretrained("laion/clap2-large-audioxl-s1B")
-        >>> processor = AutoProcessor.from_pretrained("laion/clap2-large-audioxl-s1B")
+        >>> model = AutoModel.from_pretrained("laion/clap2-small-audioxl-s1B")
+        >>> processor = AutoProcessor.from_pretrained("laion/clap2-small-audioxl-s1B")
 
         >>> inputs = processor(text=["the sound of a cat", "the sound of a dog"], padding=True, return_tensors="pt")
         >>> with torch.inference_mode():
@@ -637,8 +637,8 @@ class Clap2Model(Clap2PreTrainedModel):
         >>> from datasets import Audio, load_dataset
         >>> from transformers import AutoModel, AutoProcessor
 
-        >>> model = AutoModel.from_pretrained("laion/clap2-large-audioxl-s1B")
-        >>> processor = AutoProcessor.from_pretrained("laion/clap2-large-audioxl-s1B")
+        >>> model = AutoModel.from_pretrained("laion/clap2-small-audioxl-s1B")
+        >>> processor = AutoProcessor.from_pretrained("laion/clap2-small-audioxl-s1B")
 
         >>> dataset = load_dataset("ashraq/esc50", split="train", streaming=True)
         >>> dataset = dataset.cast_column("audio", Audio(sampling_rate=32000))
@@ -683,8 +683,8 @@ class Clap2Model(Clap2PreTrainedModel):
         >>> from datasets import Audio, load_dataset
         >>> from transformers import AutoModel, AutoProcessor
 
-        >>> model = AutoModel.from_pretrained("laion/clap2-large-audioxl-s1B")
-        >>> processor = AutoProcessor.from_pretrained("laion/clap2-large-audioxl-s1B")
+        >>> model = AutoModel.from_pretrained("laion/clap2-small-audioxl-s1B")
+        >>> processor = AutoProcessor.from_pretrained("laion/clap2-small-audioxl-s1B")
 
         >>> dataset = load_dataset("ashraq/esc50", split="train", streaming=True)
         >>> dataset = dataset.cast_column("audio", Audio(sampling_rate=32000))
@@ -704,8 +704,8 @@ class Clap2Model(Clap2PreTrainedModel):
         )
         audio_embeds = self.audio_projection(audio_outputs.pooler_output)
         text_embeds = self.text_projection(text_outputs.pooler_output)
-        audio_embeds = F.normalize(audio_embeds, dim=-1)
-        text_embeds = F.normalize(text_embeds, dim=-1)
+        audio_embeds = audio_embeds / audio_embeds.norm(p=2, dim=-1, keepdim=True)
+        text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
 
         logits_per_audio = self.logit_scale.exp() * audio_embeds @ text_embeds.t()
         logits_per_text = logits_per_audio.t()

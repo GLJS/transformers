@@ -622,8 +622,8 @@ class Clap2Model(Clap2PreTrainedModel):
         >>> import torch
         >>> from transformers import AutoModel, AutoProcessor
 
-        >>> model = AutoModel.from_pretrained("laion/clap2-large-audioxl-s1B")
-        >>> processor = AutoProcessor.from_pretrained("laion/clap2-large-audioxl-s1B")
+        >>> model = AutoModel.from_pretrained("laion/clap2-small-audioxl-s1B")
+        >>> processor = AutoProcessor.from_pretrained("laion/clap2-small-audioxl-s1B")
 
         >>> inputs = processor(text=["the sound of a cat", "the sound of a dog"], padding=True, return_tensors="pt")
         >>> with torch.inference_mode():
@@ -659,8 +659,8 @@ class Clap2Model(Clap2PreTrainedModel):
         >>> from datasets import Audio, load_dataset
         >>> from transformers import AutoModel, AutoProcessor
 
-        >>> model = AutoModel.from_pretrained("laion/clap2-large-audioxl-s1B")
-        >>> processor = AutoProcessor.from_pretrained("laion/clap2-large-audioxl-s1B")
+        >>> model = AutoModel.from_pretrained("laion/clap2-small-audioxl-s1B")
+        >>> processor = AutoProcessor.from_pretrained("laion/clap2-small-audioxl-s1B")
 
         >>> dataset = load_dataset("ashraq/esc50", split="train", streaming=True)
         >>> dataset = dataset.cast_column("audio", Audio(sampling_rate=32000))
@@ -705,8 +705,8 @@ class Clap2Model(Clap2PreTrainedModel):
         >>> from datasets import Audio, load_dataset
         >>> from transformers import AutoModel, AutoProcessor
 
-        >>> model = AutoModel.from_pretrained("laion/clap2-large-audioxl-s1B")
-        >>> processor = AutoProcessor.from_pretrained("laion/clap2-large-audioxl-s1B")
+        >>> model = AutoModel.from_pretrained("laion/clap2-small-audioxl-s1B")
+        >>> processor = AutoProcessor.from_pretrained("laion/clap2-small-audioxl-s1B")
 
         >>> dataset = load_dataset("ashraq/esc50", split="train", streaming=True)
         >>> dataset = dataset.cast_column("audio", Audio(sampling_rate=32000))
@@ -726,8 +726,8 @@ class Clap2Model(Clap2PreTrainedModel):
         )
         audio_embeds = self.audio_projection(audio_outputs.pooler_output)
         text_embeds = self.text_projection(text_outputs.pooler_output)
-        audio_embeds = F.normalize(audio_embeds, dim=-1)
-        text_embeds = F.normalize(text_embeds, dim=-1)
+        audio_embeds = audio_embeds / audio_embeds.norm(p=2, dim=-1, keepdim=True)
+        text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
 
         logits_per_audio = self.logit_scale.exp() * audio_embeds @ text_embeds.t()
         logits_per_text = logits_per_audio.t()

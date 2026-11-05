@@ -17,7 +17,7 @@ import math
 
 import numpy as np
 
-from ...audio_utils import AudioInput, make_list_of_audio
+from ...audio_utils import AudioInput, make_list_of_audio, mel_filter_bank
 from ...feature_extraction_sequence_utils import SequenceFeatureExtractor
 from ...feature_extraction_utils import BatchFeature
 from ...utils import TensorType, is_torch_available, logging
@@ -89,21 +89,27 @@ class Clap2FeatureExtractor(SequenceFeatureExtractor):
         self.patch_size = patch_size
         self.max_num_patches = max_num_patches
         self.window = torch.hann_window(n_fft)
-        # Same float32 arithmetic as `torchaudio.functional.melscale_fbanks(mel_scale="htk", norm=None)`
-        mel_min, mel_max = (2595.0 * math.log10(1.0 + f / 700.0) for f in (f_min, f_max))
-        filter_freqs = 700.0 * (10.0 ** (torch.linspace(mel_min, mel_max, feature_size + 2) / 2595.0) - 1.0)
-        slopes = filter_freqs[None] - torch.linspace(0, sampling_rate // 2, n_fft // 2 + 1)[:, None]
-        down_slopes = -slopes[:, :-2] / (filter_freqs[1:-1] - filter_freqs[:-2])
-        up_slopes = slopes[:, 2:] / (filter_freqs[2:] - filter_freqs[1:-1])
-        self.mel_filters = torch.clamp(torch.min(down_slopes, up_slopes), min=0.0)
-
-    def _extract_patches(self, waveform: np.ndarray, max_num_patches: int | None) -> "torch.Tensor":
-        waveform = torch.from_numpy(waveform)
-        waveform = torch.nn.functional.pad(waveform, (0, max(0, self.n_fft - waveform.shape[0])))
-        stft = torch.stft(
-            waveform, self.n_fft, self.hop_length, window=self.window, pad_mode="reflect", return_complex=True
+        mel_filters = mel_filter_bank(
+            num_frequency_bins=n_fft // 2 + 1,
+            num_mel_filters=feature_size,
+            min_frequency=f_min,
+            max_frequency=f_max,
+            sampling_rate=sampling_rate,
+            norm=None,
+            mel_scale="htk",
         )
-        log_mel = 10.0 * torch.log10(torch.clamp(stft.abs().pow(2).T @ self.mel_filters, min=1e-10))
+        self.mel_filters = torch.from_numpy(mel_filters).float()
+
+    def _extract_patches(
+        self, waveform: np.ndarray, max_num_patches: int | None, device: str | None
+    ) -> "torch.Tensor":
+        waveform = torch.from_numpy(waveform).to(device)
+        waveform = torch.nn.functional.pad(waveform, (0, max(0, self.n_fft - waveform.shape[0])))
+        window = self.window.to(device)
+        stft = torch.stft(
+            waveform, self.n_fft, self.hop_length, window=window, pad_mode="reflect", return_complex=True
+        )
+        log_mel = 10.0 * torch.clamp(stft.abs().pow(2).T @ self.mel_filters.to(device), min=1e-10).log10()
 
         num_freq_patches = self.feature_size // self.patch_size
         if max_num_patches is not None:
@@ -113,7 +119,7 @@ class Clap2FeatureExtractor(SequenceFeatureExtractor):
         num_fill_frames = num_time_patches * self.patch_size - log_mel.shape[0]
         log_mel = torch.cat([log_mel, log_mel.new_full((num_fill_frames, self.feature_size), log_mel.min().item())])
         patches = log_mel.reshape(num_time_patches, self.patch_size, num_freq_patches, self.patch_size)
-        return patches.permute(2, 0, 3, 1).reshape(num_freq_patches * num_time_patches, self.patch_size**2)
+        return patches.permute(2, 0, 3, 1).reshape(num_freq_patches * num_time_patches, self.patch_size**2).cpu()
 
     def __call__(
         self,
@@ -121,6 +127,7 @@ class Clap2FeatureExtractor(SequenceFeatureExtractor):
         sampling_rate: int | None = None,
         max_num_patches: int | None = None,
         return_tensors: str | TensorType | None = None,
+        device: str | None = "cpu",
         **kwargs,
     ) -> BatchFeature:
         """
@@ -136,6 +143,9 @@ class Clap2FeatureExtractor(SequenceFeatureExtractor):
                 Overrides `self.max_num_patches` for this call.
             return_tensors (`str` or [`~utils.TensorType`], *optional*):
                 If set, will return tensors of this type instead of `torch.Tensor` objects.
+            device (`str`, *optional*, defaults to `"cpu"`):
+                The device to compute the log-mel spectrogram on (e.g. `"cpu"`, `"cuda"`). The features are returned
+                on CPU.
         """
         if sampling_rate is None:
             logger.warning_once(
@@ -156,7 +166,7 @@ class Clap2FeatureExtractor(SequenceFeatureExtractor):
         num_freq_patches = self.feature_size // self.patch_size
         if max_num_patches is not None and max_num_patches < num_freq_patches:
             raise ValueError(f"`max_num_patches` must be at least {num_freq_patches}, one time column of patches.")
-        patches = [self._extract_patches(audio, max_num_patches) for audio in raw_audio]
+        patches = [self._extract_patches(audio, max_num_patches, device) for audio in raw_audio]
         num_patches = max(len(clip_patches) for clip_patches in patches)
         input_features = torch.full((len(patches), num_patches, self.patch_size**2), float(self.padding_value))
         input_features_mask = torch.zeros(len(patches), num_patches, dtype=torch.long)
